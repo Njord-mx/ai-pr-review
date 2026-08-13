@@ -2,9 +2,9 @@
 
 ## How this action handles your code
 
-- Your PR diff is sent directly from the GitHub-hosted runner to `api.anthropic.com`, using **your own** Anthropic API key. It never passes through any server operated by this project.
-- Nothing is logged, stored, or retained by this project — there is no backend.
-- The only credential this action needs is the `ANTHROPIC_API_KEY` you provide as a repository secret, plus the default `github.token` (scoped to the calling repo) to post PR comments.
+- Your PR diff is sent directly from the GitHub-hosted runner to the provider you choose (Anthropic, OpenAI, Google, or GitHub Models), using **your own** credential. It never passes through any server operated by this project — there is no backend.
+- Nothing is logged, stored, or retained by this project.
+- The only credentials this action needs are the provider key/token you configure (e.g. `ANTHROPIC_API_KEY` as a repository secret, or nothing extra for `github-models`, which uses the workflow's own token), plus the default `github.token` (scoped to the calling repo) to post PR comments.
 
 ## Reporting a vulnerability
 

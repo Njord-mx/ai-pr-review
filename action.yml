@@ -1,18 +1,32 @@
 name: 'AI PR Review'
-description: 'Language-agnostic AI code review for pull requests, powered by Claude. Reports real bugs and security issues, never blocks merge.'
+description: 'Language-agnostic AI code review for pull requests. Bring your own Anthropic, OpenAI, or Gemini key — or use your GitHub Copilot subscription via GitHub Models. Reports real bugs and security issues, never blocks merge.'
 author: 'Njord-mx'
 branding:
   icon: 'search'
   color: 'purple'
 
 inputs:
-  anthropic-api-key:
-    description: 'Your Anthropic API key (console.anthropic.com). Required — this action never sends your code anywhere except the Anthropic API you control.'
-    required: true
-  model:
-    description: 'Claude model to use'
+  provider:
+    description: "Which model provider to use: 'anthropic', 'openai', 'gemini', or 'github-models' (uses your GitHub Copilot subscription)"
     required: false
-    default: 'claude-sonnet-5'
+    default: 'anthropic'
+  anthropic-api-key:
+    description: 'Anthropic API key (console.anthropic.com). Required when provider is anthropic.'
+    required: false
+  openai-api-key:
+    description: 'OpenAI API key (platform.openai.com). Required when provider is openai.'
+    required: false
+  gemini-api-key:
+    description: 'Google AI Studio / Gemini API key (aistudio.google.com). Required when provider is gemini.'
+    required: false
+  github-models-token:
+    description: 'Token used to call GitHub Models when provider is github-models. Defaults to the workflow token — requires "models: read" permission and GitHub Models enabled for your account/org (rate limits scale with your Copilot plan). Use a PAT here instead if the default token is blocked by org policy.'
+    required: false
+    default: ${{ github.token }}
+  model:
+    description: "Model name. If omitted, a sensible default is chosen per provider — check the provider's current model catalog, as names change over time."
+    required: false
+    default: ''
   max-diff-lines:
     description: 'Maximum diff lines sent to the model (cost/context guard)'
     required: false
@@ -37,12 +51,16 @@ runs:
         git diff --unified=3 "origin/${{ github.base_ref }}...HEAD" > /tmp/ai_pr_review.diff
         echo "Diff lines: $(wc -l < /tmp/ai_pr_review.diff)"
 
-    - name: Review with Claude
+    - name: Review with AI
       shell: bash
       env:
+        PROVIDER: ${{ inputs.provider }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        GH_MODELS_TOKEN: ${{ inputs.github-models-token }}
         MAX_LINES: ${{ inputs.max-diff-lines }}
-        MODEL: ${{ inputs.model }}
+        MODEL_INPUT: ${{ inputs.model }}
         REVIEW_LANGUAGE: ${{ inputs.language }}
       run: |
         set -euo pipefail
@@ -69,32 +87,91 @@ runs:
           SYSTEM_PROMPT='You are a senior code reviewer. You review a pull request diff in ANY language (Go, .NET, TypeScript, Python, SQL, CI/CD YAML, whatever it is). Report only real bugs (logic errors, security issues, race conditions, error handling gaps, credential leaks) and clear opportunities for simplification or reuse — do not comment on style or subjective preferences, and do not invent findings if the diff is clean: say so explicitly in that case. Respond in Markdown. Each finding must include: file and approximate line, severity (high/medium/low), a brief description of the defect, and the concrete scenario (input/state) that triggers it.'
         fi
 
-        jq -n \
-          --arg model "$MODEL" \
-          --arg system "$SYSTEM_PROMPT" \
-          --rawfile diff /tmp/ai_pr_review.diff.truncated \
-          '{
-            model: $model,
-            max_tokens: 4096,
-            system: $system,
-            messages: [{role: "user", content: ("PR diff:\n\n```diff\n" + $diff + "\n```")}]
-          }' > /tmp/ai_pr_review_payload.json
+        USER_CONTENT=$(printf 'PR diff:\n\n```diff\n%s\n```' "$(cat /tmp/ai_pr_review.diff.truncated)")
 
-        HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://api.anthropic.com/v1/messages \
-          -H "x-api-key: $ANTHROPIC_API_KEY" \
-          -H "anthropic-version: 2023-06-01" \
-          -H "content-type: application/json" \
-          -d @/tmp/ai_pr_review_payload.json)
+        case "$PROVIDER" in
+          anthropic)
+            if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+              echo "::error::provider is 'anthropic' but anthropic-api-key was not provided."
+              exit 1
+            fi
+            MODEL="${MODEL_INPUT:-claude-sonnet-5}"
+            jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_CONTENT" \
+              '{model:$model, max_tokens:4096, system:$system, messages:[{role:"user",content:$user}]}' \
+              > /tmp/ai_pr_review_payload.json
+            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d @/tmp/ai_pr_review_payload.json)
+            TEXT_JQ='.content[0].text'
+            ;;
+
+          openai)
+            if [ -z "${OPENAI_API_KEY:-}" ]; then
+              echo "::error::provider is 'openai' but openai-api-key was not provided."
+              exit 1
+            fi
+            MODEL="${MODEL_INPUT:-gpt-4o}"
+            jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_CONTENT" \
+              '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}]}' \
+              > /tmp/ai_pr_review_payload.json
+            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://api.openai.com/v1/chat/completions \
+              -H "Authorization: Bearer $OPENAI_API_KEY" \
+              -H "content-type: application/json" \
+              -d @/tmp/ai_pr_review_payload.json)
+            TEXT_JQ='.choices[0].message.content'
+            ;;
+
+          gemini)
+            if [ -z "${GEMINI_API_KEY:-}" ]; then
+              echo "::error::provider is 'gemini' but gemini-api-key was not provided."
+              exit 1
+            fi
+            MODEL="${MODEL_INPUT:-gemini-1.5-pro}"
+            jq -n --arg system "$SYSTEM_PROMPT" --arg user "$USER_CONTENT" \
+              '{system_instruction:{parts:[{text:$system}]}, contents:[{role:"user",parts:[{text:$user}]}]}' \
+              > /tmp/ai_pr_review_payload.json
+            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" \
+              "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
+              -H "content-type: application/json" \
+              -d @/tmp/ai_pr_review_payload.json)
+            TEXT_JQ='.candidates[0].content.parts[0].text'
+            ;;
+
+          github-models)
+            if [ -z "${GH_MODELS_TOKEN:-}" ]; then
+              echo "::error::provider is 'github-models' but no token was available (github-models-token)."
+              exit 1
+            fi
+            MODEL="${MODEL_INPUT:-openai/gpt-4o}"
+            jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_CONTENT" \
+              '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}]}' \
+              > /tmp/ai_pr_review_payload.json
+            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://models.github.ai/inference/chat/completions \
+              -H "Authorization: Bearer $GH_MODELS_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "content-type: application/json" \
+              -d @/tmp/ai_pr_review_payload.json)
+            TEXT_JQ='.choices[0].message.content'
+            ;;
+
+          *)
+            echo "::error::Unknown provider '$PROVIDER'. Must be one of: anthropic, openai, gemini, github-models"
+            exit 1
+            ;;
+        esac
 
         if [ "$HTTP_CODE" != "200" ]; then
-          echo "::error::Anthropic API returned HTTP $HTTP_CODE"
+          echo "::error::$PROVIDER API returned HTTP $HTTP_CODE"
           cat /tmp/ai_pr_review_response.json
           exit 1
         fi
 
-        jq -r '.content[0].text' /tmp/ai_pr_review_response.json > /tmp/ai_pr_review_body.md
+        jq -r "$TEXT_JQ" /tmp/ai_pr_review_response.json > /tmp/ai_pr_review_body.md
         printf '%s' "$TRUNCATED_NOTE" >> /tmp/ai_pr_review_body.md
         mv /tmp/ai_pr_review_body.md /tmp/ai_pr_review_result.md
+        echo "$PROVIDER ($MODEL)" > /tmp/ai_pr_review_provider.txt
 
     - name: Post/update PR comment
       shell: bash
@@ -104,9 +181,13 @@ runs:
       run: |
         set -euo pipefail
         MARKER="<!-- ai-pr-review-bot -->"
-        HEADING="## 🤖 AI PR Review"
+        PROVIDER_LABEL=""
+        if [ -f /tmp/ai_pr_review_provider.txt ]; then
+          PROVIDER_LABEL=" (via $(cat /tmp/ai_pr_review_provider.txt))"
+        fi
+        HEADING="## 🤖 AI PR Review${PROVIDER_LABEL}"
         if [ "$REVIEW_LANGUAGE" = "es" ]; then
-          HEADING="## 🤖 Revisión automática (IA)"
+          HEADING="## 🤖 Revisión automática (IA)${PROVIDER_LABEL}"
         fi
 
         {
