@@ -1,0 +1,127 @@
+name: 'AI PR Review'
+description: 'Language-agnostic AI code review for pull requests, powered by Claude. Reports real bugs and security issues, never blocks merge.'
+author: 'Njord-mx'
+branding:
+  icon: 'search'
+  color: 'purple'
+
+inputs:
+  anthropic-api-key:
+    description: 'Your Anthropic API key (console.anthropic.com). Required — this action never sends your code anywhere except the Anthropic API you control.'
+    required: true
+  model:
+    description: 'Claude model to use'
+    required: false
+    default: 'claude-sonnet-5'
+  max-diff-lines:
+    description: 'Maximum diff lines sent to the model (cost/context guard)'
+    required: false
+    default: '2500'
+  language:
+    description: "Review comment language: 'en' or 'es'"
+    required: false
+    default: 'en'
+  github-token:
+    description: 'Token used to post the PR comment. Defaults to the workflow token.'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate PR diff
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch origin "${{ github.base_ref }}" --depth=1 2>/dev/null || true
+        git diff --unified=3 "origin/${{ github.base_ref }}...HEAD" > /tmp/ai_pr_review.diff
+        echo "Diff lines: $(wc -l < /tmp/ai_pr_review.diff)"
+
+    - name: Review with Claude
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        MAX_LINES: ${{ inputs.max-diff-lines }}
+        MODEL: ${{ inputs.model }}
+        REVIEW_LANGUAGE: ${{ inputs.language }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -s /tmp/ai_pr_review.diff ]; then
+          echo "No changes in diff, nothing to review." > /tmp/ai_pr_review_result.md
+          exit 0
+        fi
+
+        head -n "$MAX_LINES" /tmp/ai_pr_review.diff > /tmp/ai_pr_review.diff.truncated
+        TOTAL_LINES=$(wc -l < /tmp/ai_pr_review.diff)
+        TRUNCATED_NOTE=""
+        if [ "$TOTAL_LINES" -gt "$MAX_LINES" ]; then
+          if [ "$REVIEW_LANGUAGE" = "es" ]; then
+            TRUNCATED_NOTE="\n\n_Nota: el diff excede $MAX_LINES líneas, se revisaron solo las primeras $MAX_LINES._"
+          else
+            TRUNCATED_NOTE="\n\n_Note: the diff exceeds $MAX_LINES lines, only the first $MAX_LINES were reviewed._"
+          fi
+        fi
+
+        if [ "$REVIEW_LANGUAGE" = "es" ]; then
+          SYSTEM_PROMPT='Eres un revisor de código senior. Revisas el diff de un pull request en CUALQUIER lenguaje (Go, .NET, TypeScript, Python, SQL, YAML de CI, lo que sea). Reporta únicamente bugs reales (lógica, seguridad, condiciones de carrera, manejo de errores, fugas de credenciales) y oportunidades claras de simplificación o reutilización — no comentes sobre estilo ni preferencias subjetivas, y no inventes hallazgos si el diff está limpio: dilo explícitamente en ese caso. Responde en Markdown, en español. Cada hallazgo debe tener: archivo y línea aproximada, severidad (alta/media/baja), descripción breve del defecto, y el escenario concreto (entrada/estado) que lo dispara.'
+        else
+          SYSTEM_PROMPT='You are a senior code reviewer. You review a pull request diff in ANY language (Go, .NET, TypeScript, Python, SQL, CI/CD YAML, whatever it is). Report only real bugs (logic errors, security issues, race conditions, error handling gaps, credential leaks) and clear opportunities for simplification or reuse — do not comment on style or subjective preferences, and do not invent findings if the diff is clean: say so explicitly in that case. Respond in Markdown. Each finding must include: file and approximate line, severity (high/medium/low), a brief description of the defect, and the concrete scenario (input/state) that triggers it.'
+        fi
+
+        jq -n \
+          --arg model "$MODEL" \
+          --arg system "$SYSTEM_PROMPT" \
+          --rawfile diff /tmp/ai_pr_review.diff.truncated \
+          '{
+            model: $model,
+            max_tokens: 4096,
+            system: $system,
+            messages: [{role: "user", content: ("PR diff:\n\n```diff\n" + $diff + "\n```")}]
+          }' > /tmp/ai_pr_review_payload.json
+
+        HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://api.anthropic.com/v1/messages \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -H "content-type: application/json" \
+          -d @/tmp/ai_pr_review_payload.json)
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "::error::Anthropic API returned HTTP $HTTP_CODE"
+          cat /tmp/ai_pr_review_response.json
+          exit 1
+        fi
+
+        jq -r '.content[0].text' /tmp/ai_pr_review_response.json > /tmp/ai_pr_review_body.md
+        printf '%s' "$TRUNCATED_NOTE" >> /tmp/ai_pr_review_body.md
+        mv /tmp/ai_pr_review_body.md /tmp/ai_pr_review_result.md
+
+    - name: Post/update PR comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REVIEW_LANGUAGE: ${{ inputs.language }}
+      run: |
+        set -euo pipefail
+        MARKER="<!-- ai-pr-review-bot -->"
+        HEADING="## 🤖 AI PR Review"
+        if [ "$REVIEW_LANGUAGE" = "es" ]; then
+          HEADING="## 🤖 Revisión automática (IA)"
+        fi
+
+        {
+          echo "$MARKER"
+          echo ""
+          echo "$HEADING"
+          echo ""
+          cat /tmp/ai_pr_review_result.md
+        } > /tmp/ai_pr_review_comment.md
+
+        EXISTING_ID=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+          --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n1)
+
+        if [ -n "$EXISTING_ID" ]; then
+          gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$EXISTING_ID" -F body=@/tmp/ai_pr_review_comment.md
+        else
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/ai_pr_review_comment.md
+        fi
