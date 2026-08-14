@@ -1,5 +1,5 @@
-# Example: all four providers side by side. You wouldn't normally run all
-# four on every PR — this is here to show the exact config for each one.
+# Example: all three providers side by side. You wouldn't normally run all
+# three on every PR — this is here to show the exact config for each one.
 # Pick the job that matches the provider you want and delete the rest.
 name: AI PR Review
 
@@ -10,7 +10,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  models: read # only needed by the github-models job below
 
 jobs:
   review-anthropic:
@@ -45,16 +44,3 @@ jobs:
         with:
           provider: gemini
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
-
-  review-github-models:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: Njord-mx/ai-pr-review@v1
-        with:
-          provider: github-models
-          # No key needed — uses your GitHub Copilot subscription.
-          # Override github-models-token with a PAT if org policy blocks
-          # the default workflow token from calling GitHub Models.

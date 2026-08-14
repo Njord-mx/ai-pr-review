@@ -1,5 +1,5 @@
 name: 'AI PR Review'
-description: 'Language-agnostic AI code review for pull requests. Bring your own Anthropic, OpenAI, or Gemini key — or use your GitHub Copilot subscription via GitHub Models. Reports real bugs and security issues, never blocks merge.'
+description: 'Language-agnostic AI code review for pull requests. Bring your own Anthropic, OpenAI, or Gemini key. Reports real bugs and security issues, never blocks merge.'
 author: 'Njord-mx'
 branding:
   icon: 'search'
@@ -7,7 +7,7 @@ branding:
 
 inputs:
   provider:
-    description: "Which model provider to use: 'anthropic', 'openai', 'gemini', or 'github-models' (uses your GitHub Copilot subscription)"
+    description: "Which model provider to use: 'anthropic', 'openai', or 'gemini'"
     required: false
     default: 'anthropic'
   anthropic-api-key:
@@ -19,10 +19,6 @@ inputs:
   gemini-api-key:
     description: 'Google AI Studio / Gemini API key (aistudio.google.com). Required when provider is gemini.'
     required: false
-  github-models-token:
-    description: 'Token used to call GitHub Models when provider is github-models. Defaults to the workflow token — requires "models: read" permission and GitHub Models enabled for your account/org (rate limits scale with your Copilot plan). Use a PAT here instead if the default token is blocked by org policy.'
-    required: false
-    default: ${{ github.token }}
   model:
     description: "Model name. If omitted, a sensible default is chosen per provider — check the provider's current model catalog, as names change over time."
     required: false
@@ -58,7 +54,6 @@ runs:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
-        GH_MODELS_TOKEN: ${{ inputs.github-models-token }}
         MAX_LINES: ${{ inputs.max-diff-lines }}
         MODEL_INPUT: ${{ inputs.model }}
         REVIEW_LANGUAGE: ${{ inputs.language }}
@@ -139,25 +134,8 @@ runs:
             TEXT_JQ='.candidates[0].content.parts[0].text'
             ;;
 
-          github-models)
-            if [ -z "${GH_MODELS_TOKEN:-}" ]; then
-              echo "::error::provider is 'github-models' but no token was available (github-models-token)."
-              exit 1
-            fi
-            MODEL="${MODEL_INPUT:-openai/gpt-4o}"
-            jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_CONTENT" \
-              '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}]}' \
-              > /tmp/ai_pr_review_payload.json
-            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://models.github.ai/inference/chat/completions \
-              -H "Authorization: Bearer $GH_MODELS_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "content-type: application/json" \
-              -d @/tmp/ai_pr_review_payload.json)
-            TEXT_JQ='.choices[0].message.content'
-            ;;
-
           *)
-            echo "::error::Unknown provider '$PROVIDER'. Must be one of: anthropic, openai, gemini, github-models"
+            echo "::error::Unknown provider '$PROVIDER'. Must be one of: anthropic, openai, gemini"
             exit 1
             ;;
         esac
