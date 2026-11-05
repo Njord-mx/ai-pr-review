@@ -16,6 +16,10 @@ inputs:
   openai-api-key:
     description: 'OpenAI API key (platform.openai.com). Required when provider is openai.'
     required: false
+  openai-base-url:
+    description: 'Base URL of an OpenAI-compatible API, including the version path (e.g. https://llm.example.com/v1). Must use https. Defaults to the OpenAI API.'
+    required: false
+    default: 'https://api.openai.com/v1'
   gemini-api-key:
     description: 'Google AI Studio / Gemini API key (aistudio.google.com). Required when provider is gemini.'
     required: false
@@ -53,6 +57,7 @@ runs:
         PROVIDER: ${{ inputs.provider }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        OPENAI_BASE_URL: ${{ inputs.openai-base-url }}
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
         MAX_LINES: ${{ inputs.max-diff-lines }}
         MODEL_INPUT: ${{ inputs.model }}
@@ -107,11 +112,18 @@ runs:
               echo "::error::provider is 'openai' but openai-api-key was not provided."
               exit 1
             fi
+            OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+            OPENAI_BASE_URL="${OPENAI_BASE_URL%/}"
+            # https only, with a host: the key must never travel in clear text.
+            if ! [[ "$OPENAI_BASE_URL" =~ ^https://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$ ]]; then
+              echo "::error::openai-base-url must be an https:// URL with a host."
+              exit 1
+            fi
             MODEL="${MODEL_INPUT:-gpt-4o}"
             jq -n --arg model "$MODEL" --arg system "$SYSTEM_PROMPT" --arg user "$USER_CONTENT" \
               '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$user}]}' \
               > /tmp/ai_pr_review_payload.json
-            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" https://api.openai.com/v1/chat/completions \
+            HTTP_CODE=$(curl -sS -o /tmp/ai_pr_review_response.json -w "%{http_code}" "$OPENAI_BASE_URL/chat/completions" \
               -H "Authorization: Bearer $OPENAI_API_KEY" \
               -H "content-type: application/json" \
               -d @/tmp/ai_pr_review_payload.json)

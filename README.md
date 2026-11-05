@@ -55,6 +55,7 @@ Add `ANTHROPIC_API_KEY` as a repository secret (Settings → Secrets and variabl
 | `provider` | no | `anthropic` | `anthropic`, `openai`, or `gemini` |
 | `anthropic-api-key` | if provider is `anthropic` | — | Your Anthropic API key |
 | `openai-api-key` | if provider is `openai` | — | Your OpenAI API key |
+| `openai-base-url` | no | `https://api.openai.com/v1` | Base URL of any OpenAI-compatible API (an internal LLM gateway, Azure OpenAI behind a proxy, etc.), including the version path. Must be `https://`. Pass it from a secret if you don't want the URL in the workflow. |
 | `gemini-api-key` | if provider is `gemini` | — | Your Gemini API key |
 | `model` | no | provider-specific | Overrides the default model for the chosen provider |
 | `max-diff-lines` | no | `2500` | Caps diff size sent to the model (cost/context guard) |
